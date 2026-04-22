@@ -94,15 +94,33 @@ def main():
         name = ds_cfg["name"]
         age_col = ds_cfg.get("age_col", "age")
         scale = ds_cfg.get("age_scale", 1.0)
-        table = pd.read_csv(ds_cfg["table_csv"], low_memory=False)
-        if age_col not in table.columns:
+
+        # table_csv가 없으면 label_csv를 테이블로 사용 (ToF 스타일)
+        src_csv = ds_cfg.get("table_csv") or ds_cfg.get("label_csv")
+        if src_csv is None:
+            logging.warning(f"  [{name}] table_csv/label_csv 없음, skipping")
+            continue
+        table = pd.read_csv(src_csv, low_memory=False)
+
+        if age_col in table.columns:
+            ages = pd.to_numeric(table[age_col], errors="coerce").values * scale
+        elif "dob" in table.columns and "hookup_date" in table.columns:
+            # ToF 라벨처럼 age가 없으면 dob/hookup_date로 계산
+            dob = pd.to_datetime(table["dob"], errors="coerce")
+            hookup = pd.to_datetime(table["hookup_date"], errors="coerce")
+            ages = ((hookup - dob).dt.days / 365.25).values
+            logging.info(f"  [{name}] age를 dob/hookup_date에서 계산")
+        else:
             logging.warning(f"  [{name}] age_col='{age_col}' not found, skipping")
             continue
-        ages = table[age_col].values * scale
-        bin_labels = np.array([bin_label(a, age_bins) for a in ages])
+
+        bin_labels = np.array([bin_label(a, age_bins) if np.isfinite(a) else None
+                               for a in ages])
         ds_ages[name] = ages
         ds_bin_labels[name] = bin_labels
-        logging.info(f"[{name}] age range: {ages.min():.1f} ~ {ages.max():.1f}")
+        finite = ages[np.isfinite(ages)]
+        if len(finite):
+            logging.info(f"[{name}] age range: {finite.min():.1f} ~ {finite.max():.1f}")
 
     if not ds_ages:
         logging.error("age_col이 있는 데이터셋이 없습니다. config에 age_col을 추가하세요.")

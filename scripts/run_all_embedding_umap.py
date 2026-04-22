@@ -149,15 +149,23 @@ def build_dataset(ds_cfg, default_fs, default_len):
     """config entry → H5ECGDataset"""
     return H5ECGDataset(
         h5_root=ds_cfg["h5_root"],
-        table_csv=ds_cfg["table_csv"],
+        table_csv=ds_cfg.get("table_csv"),
         label_csv=ds_cfg.get("label_csv"),
+        label_cols=ds_cfg.get("label_cols"),
         target_fs=ds_cfg.get("target_fs", default_fs),
         target_length=ds_cfg.get("target_length", default_len),
+        h5_schema=ds_cfg.get("h5_schema", "standard"),
+        join_key=ds_cfg.get("join_key", "filepath"),
+        filepath_from=ds_cfg.get("filepath_from"),
+        filepath_suffix=ds_cfg.get("filepath_suffix", ".h5"),
+        expand_8_to_12=ds_cfg.get("expand_8_to_12", False),
     )
 
 
-def labels_to_normal(labels: np.ndarray, label_idx: int = 0):
-    return ["Normal" if row[label_idx] > 0 else "Abnormal" for row in labels]
+def labels_to_class(labels: np.ndarray, label_idx: int = 0,
+                    pos_name: str = "Normal", neg_name: str = "Abnormal"):
+    """value > 0 → pos_name, else neg_name"""
+    return [pos_name if row[label_idx] > 0 else neg_name for row in labels]
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -402,29 +410,39 @@ def main():
                     label_idx = d["ds"].label_cols.index(label_col)
                 else:
                     label_idx = 0
-                norm_str = labels_to_normal(raw, label_idx)
+
+                # 라벨 의미 설정 (config에서 override 가능)
+                # 기본: PTB-XL 스타일 — label=1이 Normal(녹색), label=0이 Abnormal(빨강)
+                pos_name = d["cfg"].get("positive_label", "Normal")
+                neg_name = d["cfg"].get("negative_label", "Abnormal")
+                pos_color = d["cfg"].get("positive_color", "#2ecc71")
+                neg_color = d["cfg"].get("negative_color", "#e74c3c")
+
+                class_str = labels_to_class(raw, label_idx, pos_name, neg_name)
                 ds_coords = coords[ds_offset:ds_offset + len(ds_emb)]
 
-                binary = [0 if s == "Normal" else 1 for s in norm_str]
+                binary = [1 if s == pos_name else 0 for s in class_str]
                 sil_na = (silhouette_score(ds_emb, binary,
                                            sample_size=min(10000, len(ds_emb)))
                           if len(set(binary)) > 1 else float("nan"))
                 per_ds_sils[dname] = sil_na
 
                 ax = axes2[row_idx, col_idx]
-                colors = ["#2ecc71" if s == "Normal" else "#e74c3c" for s in norm_str]
+                colors = [pos_color if s == pos_name else neg_color for s in class_str]
                 ax.scatter(ds_coords[:, 0], ds_coords[:, 1], c=colors, s=5,
                            alpha=0.45, rasterized=True)
+                n_pos = binary.count(1)
+                n_neg = binary.count(0)
                 legend_na = [
-                    Line2D([0], [0], marker="o", color="w", markerfacecolor="#2ecc71",
-                           markersize=8, label=f"Normal (n={binary.count(0)})"),
-                    Line2D([0], [0], marker="o", color="w", markerfacecolor="#e74c3c",
-                           markersize=8, label=f"Abnormal (n={binary.count(1)})"),
+                    Line2D([0], [0], marker="o", color="w", markerfacecolor=pos_color,
+                           markersize=8, label=f"{pos_name} (n={n_pos})"),
+                    Line2D([0], [0], marker="o", color="w", markerfacecolor=neg_color,
+                           markersize=8, label=f"{neg_name} (n={n_neg})"),
                 ]
                 ax.legend(handles=legend_na, fontsize=8)
                 sil_str = f"{sil_na:.3f}" if not np.isnan(sil_na) else "nan"
                 ax.set_title(
-                    f"{model_name} — {dname}\nNormal vs Abnormal (sil={sil_str})",
+                    f"{model_name} — {dname}\n{pos_name} vs {neg_name} ({label_col}, sil={sil_str})",
                     fontsize=11,
                 )
                 ax.set_xlabel("UMAP 1")
@@ -435,7 +453,7 @@ def main():
         rec = {"model": model_name, "feature_dim": data["feature_dim"],
                "dataset_separation": sil_ds}
         for dname, sil in per_ds_sils.items():
-            rec[f"{dname}_normal_vs_abnormal"] = sil
+            rec[f"{dname}_pos_vs_neg"] = sil
         silhouette_records.append(rec)
 
     # 저장
@@ -451,7 +469,7 @@ def main():
 
     if any_labels:
         plt.figure(fig2.number)
-        plt.suptitle("ECG FMs — Normal vs Abnormal per dataset",
+        plt.suptitle("ECG FMs — binary label per dataset",
                      fontsize=14, y=1.005)
         plt.tight_layout()
         fig2.savefig(out_dir / "umap_by_label.png", dpi=150, bbox_inches="tight")
@@ -465,7 +483,7 @@ def main():
     for r in silhouette_records:
         all_keys.update(r.keys())
     fieldnames = ["model", "feature_dim", "dataset_separation"] + \
-                 [k for k in sorted(all_keys) if k.endswith("_normal_vs_abnormal")]
+                 [k for k in sorted(all_keys) if k.endswith("_pos_vs_neg")]
     with open(csv_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()

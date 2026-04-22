@@ -49,18 +49,23 @@ class H5ECGDataset(Dataset):
 
     def __init__(
         self,
-        h5_root:       str,
-        table_csv:     str,
-        label_csv:     str = None,
-        label_cols:    list = None,
-        target_fs:     int = None,
-        target_length: int = None,
-        seg_idx:       str = None,  # None(=0), 'all', or int
-        normalize:     bool = False,
-        fold_col:      str = None,
-        fold_ids:      list = None,
-        mean:          np.ndarray = None,
-        std:           np.ndarray = None,
+        h5_root:        str,
+        table_csv:      str = None,
+        label_csv:      str = None,
+        label_cols:     list = None,
+        target_fs:      int = None,
+        target_length:  int = None,
+        seg_idx:        str = None,  # None(=0), 'all', or int
+        normalize:      bool = False,
+        fold_col:       str = None,
+        fold_ids:       list = None,
+        mean:           np.ndarray = None,
+        std:            np.ndarray = None,
+        h5_schema:      str = "standard",  # "standard" (ECG/...) | "tof" (ECG/recording/...)
+        join_key:       str = "filepath",
+        filepath_from:  str = None,         # if set: self.table["filepath"] = table[filepath_from] + filepath_suffix
+        filepath_suffix: str = ".h5",
+        expand_8_to_12: bool = False,       # I,II,V1-V6 → 12-lead via Einthoven/Goldberger
     ):
         self.h5_root = Path(h5_root)
         self.target_fs = target_fs
@@ -68,25 +73,50 @@ class H5ECGDataset(Dataset):
         self.normalize = normalize
         self.mean = mean
         self.std = std
+        self.h5_schema = h5_schema
+        self.expand_8_to_12 = expand_8_to_12
+        self._h5_base = "ECG/recording" if h5_schema == "tof" else "ECG"
 
-        # 메타 테이블 로드
-        self.table = pd.read_csv(table_csv, low_memory=False)
+        # 메타 테이블 로드 (table_csv 없으면 label_csv를 그대로 테이블로 사용)
+        if table_csv is not None and os.path.exists(table_csv):
+            self.table = pd.read_csv(table_csv, low_memory=False)
+            _have_separate_table = True
+        elif label_csv is not None and os.path.exists(label_csv):
+            self.table = pd.read_csv(label_csv, low_memory=False)
+            _have_separate_table = False
+        else:
+            raise ValueError("table_csv 또는 label_csv 중 하나는 반드시 필요합니다.")
 
-        # 라벨 CSV 로드 + 조인
+        # filepath 컬럼 파생 (예: base_name → base_name + ".h5")
+        if filepath_from is not None and "filepath" not in self.table.columns:
+            self.table["filepath"] = (
+                self.table[filepath_from].astype(str) + filepath_suffix
+            )
+
+        # 라벨 CSV 로드 + 조인 (table_csv와 다른 파일일 때만 merge)
         self.has_labels = label_csv is not None and os.path.exists(label_csv)
-        if self.has_labels:
+        if self.has_labels and _have_separate_table:
             label_df = pd.read_csv(label_csv, low_memory=False)
-            key_cols = ["filepath"]
-            self.table = self.table.merge(label_df, on=key_cols, how="left",
+            if filepath_from is not None and "filepath" not in label_df.columns \
+                    and filepath_from in label_df.columns:
+                label_df["filepath"] = (
+                    label_df[filepath_from].astype(str) + filepath_suffix
+                )
+            self.table = self.table.merge(label_df, on=[join_key], how="left",
                                           suffixes=("", "_label"))
 
+        if self.has_labels:
             if label_cols is None:
                 # key가 아닌 모든 컬럼 = 라벨
                 non_label = {"filepath", "dataset", "pid", "rid", "sid", "oid",
-                             "age", "gender", "height", "weight", "fs",
+                             "age", "gender", "sex", "height", "weight", "fs",
+                             "base_name", "hookup_date", "hookup_time", "duration",
+                             "name", "holter", "enroll", "dob", "outc_last_fu_date",
+                             "age_at_last_fu",
                              "channel_name", "nan_ratio", "amp_mean", "amp_std",
                              "amp_skewness", "amp_kurtosis", "bs_corr", "bs_dtw"}
-                label_cols = [c for c in label_df.columns if c not in non_label]
+                src_cols = (label_df.columns if _have_separate_table else self.table.columns)
+                label_cols = [c for c in src_cols if c not in non_label]
             self.label_cols = label_cols
             self.num_classes = len(label_cols)
         else:
@@ -111,7 +141,7 @@ class H5ECGDataset(Dataset):
             h5_path = self.h5_root / row["filepath"]
             try:
                 with h5py.File(h5_path, "r") as f:
-                    n_segs = int(f["ECG/segments"].attrs.get("seg_len", 1))
+                    n_segs = int(f[f"{self._h5_base}/segments"].attrs.get("seg_len", 1))
                 for s in range(n_segs):
                     expanded_rows.append(i)
                     expanded_segs.append(s)
@@ -131,9 +161,13 @@ class H5ECGDataset(Dataset):
 
         # H5에서 신호 로드
         with h5py.File(h5_path, "r") as f:
-            fs = int(f["ECG/metadata"].attrs.get("fs", 500))
-            sig = f[f"ECG/segments/{seg_i}/signal"][()].astype(np.float32)
+            fs = int(f[f"{self._h5_base}/metadata"].attrs.get("fs", 500))
+            sig = f[f"{self._h5_base}/segments/{seg_i}/signal"][()].astype(np.float32)
             # sig: (n_leads, samples)
+
+        # 8-lead (I, II, V1~V6) → 12-lead 복원 (Einthoven/Goldberger)
+        if self.expand_8_to_12 and sig.shape[0] == 8:
+            sig = self._expand_8_to_12(sig)
 
         # ── 리샘플링 + 길이 조정 ──
         # 1단계: fs가 다르면 target_fs로 리샘플링 (upsample/downsample)
@@ -166,6 +200,29 @@ class H5ECGDataset(Dataset):
             "fs":     fs,
             "idx":    idx,
         }
+
+    @staticmethod
+    def _expand_8_to_12(sig):
+        """
+        8-lead (I, II, V1, V2, V3, V4, V5, V6) → 12-lead 복원.
+
+        공식 (Einthoven / Goldberger):
+          III = II - I
+          aVR = -(I + II) / 2
+          aVL = (I - III) / 2
+          aVF = (II + III) / 2
+
+        출력 순서: I, II, III, aVR, aVL, aVF, V1, V2, V3, V4, V5, V6
+        """
+        I, II = sig[0], sig[1]
+        III = II - I
+        aVR = -(I + II) / 2.0
+        aVL = (I - III) / 2.0
+        aVF = (II + III) / 2.0
+        return np.stack(
+            [I, II, III, aVR, aVL, aVF, sig[2], sig[3], sig[4], sig[5], sig[6], sig[7]],
+            axis=0,
+        ).astype(np.float32)
 
     @staticmethod
     def _resample(sig, orig_fs, target_fs):
@@ -225,7 +282,7 @@ def build_dataloaders(cfg, split="train"):
 
     ds = H5ECGDataset(
         h5_root=cfg["h5_root"],
-        table_csv=cfg["table_csv"],
+        table_csv=cfg.get("table_csv"),
         label_csv=cfg.get("label_csv"),
         label_cols=cfg.get("label_cols"),
         target_fs=cfg.get("target_fs"),
@@ -236,6 +293,11 @@ def build_dataloaders(cfg, split="train"):
         fold_ids=cfg.get(f"{split}_folds"),
         mean=cfg.get("mean"),
         std=cfg.get("std"),
+        h5_schema=cfg.get("h5_schema", "standard"),
+        join_key=cfg.get("join_key", "filepath"),
+        filepath_from=cfg.get("filepath_from"),
+        filepath_suffix=cfg.get("filepath_suffix", ".h5"),
+        expand_8_to_12=cfg.get("expand_8_to_12", False),
     )
     loader = DataLoader(
         ds,
