@@ -1,0 +1,46 @@
+{
+  "_comment": "원본 실행에 사용된 PTB-XL (성인) + ZZU-pECG (소아) config",
+
+  "model_dir": "/home/irteam/ddn-opendata1/model/ECGFMs",
+
+  "models": null,
+
+  "target_fs": 500,
+  "target_length": 5000,
+
+  "datasets": [
+    {
+      "name": "PTB-XL",
+      "h5_root": "/home/irteam/ddn-opendata1/h5/physionet/v2.0",
+      "table_csv": "/home/irteam/ddn-opendata1/h5/physionet/v2.0/ptbxl_table.csv",
+      "label_csv": "labels/ptbxl_super_bench_labels.csv",
+      "label_col": "NORM",
+      "age_col": "age",
+      "age_scale": 100,
+      "display_color": "#1f77b4",
+      "display_marker": "o"
+    },
+    {
+      "name": "ZZU-pECG",
+      "h5_root": "/home/irteam/ddn-opendata1/h5/ZZU-pECG/v2.0",
+      "table_csv": "/home/irteam/ddn-opendata1/h5/ZZU-pECG/v2.0/ecg_table.csv",
+      "label_csv": "labels/zzu_bench_labels.csv",
+      "label_col": "is_Normal",
+      "age_col": "age",
+      "age_scale": 100,
+      "display_color": "#d62728",
+      "display_marker": "^"
+    }
+  ],
+
+  "age_bins": [
+    [0,   3,   "#CC79A7"],
+    [3,   6,   "#9400D3"],
+    [6,   12,  "#D55E00"],
+    [12,  18,  "#F0E442"],
+    [18,  40,  "#0072B2"],
+    [40,  60,  "#009E73"],
+    [60,  80,  "#E69F00"],
+    [80,  200, "#000000"]
+  ]
+}

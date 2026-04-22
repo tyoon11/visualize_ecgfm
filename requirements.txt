@@ -1,0 +1,31 @@
+# Core
+torch>=2.0
+numpy
+pandas
+h5py
+tqdm
+scipy
+
+# Visualization
+matplotlib
+scikit-learn
+umap-learn
+
+# Model utilities (ECG Foundation Models)
+einops
+timm                      # ECG-JEPA, MERL ViT (DropPath)
+safetensors               # HuBERT-ECG
+
+# ECG-FM-KED (fastai v1 API → v2 shim in encoder)
+fastai
+fastcore
+
+# HuBERT-ECG preprocessing
+biosppy
+peakutils
+
+# CPC (S4 state-space model)
+pytorch-lightning         # S4 rank_zero_only
+opt_einsum                # S4 einsum optimization
+# pykeops                 # 선택: S4 Cauchy kernel (없으면 encoder-only fallback)
+                          # 설치 시 g++, CUDA nvrtc 필요

@@ -1,0 +1,268 @@
+"""
+CPC Encoder Adapter
+====================
+Model sampling frequency: 240 Hz
+Embedding dimension: 512
+
+Hydra/Lightning 의존성 없이 체크포인트에서 직접 encoder + predictor를 로드합니다.
+구조:
+  - Encoder: 4층 Conv1d (12→512, stride=[2,1,1,1], ks=[3,1,1,1]) + BatchNorm + ReLU
+  - Predictor: 4층 S4 (state-space model, dim=512)
+임베딩에는 encoder + predictor 전체 출력을 사용합니다.
+"""
+
+import os
+import sys
+import ctypes.util
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from pathlib import Path
+
+ECG_FM_BENCH = Path(__file__).resolve().parents[2] / "third_party"
+sys.path.insert(0, str(ECG_FM_BENCH))
+
+
+def _prepend_env_path(name: str, value: Path) -> None:
+    if not value.exists():
+        return
+    current = os.environ.get(name, "")
+    parts = [p for p in current.split(":") if p]
+    value_str = str(value)
+    if value_str not in parts:
+        os.environ[name] = ":".join([value_str, *parts]) if parts else value_str
+
+
+def _configure_s4_runtime() -> None:
+    """Expose CUDA toolkit and compilers so PyKeOps can build its NVRTC backend."""
+    if getattr(_configure_s4_runtime, "_done", False):
+        return
+
+    env_prefix = Path(sys.executable).resolve().parents[1]
+    bin_dir = env_prefix / "bin"
+    lib_dir = env_prefix / "lib"
+    cuda_root = env_prefix / "targets" / "x86_64-linux"
+
+    gxx = bin_dir / "x86_64-conda-linux-gnu-g++"
+    gcc = bin_dir / "x86_64-conda-linux-gnu-gcc"
+    if gxx.exists():
+        os.environ.setdefault("CXX", str(gxx))
+    if gcc.exists():
+        os.environ.setdefault("CC", str(gcc))
+
+    _prepend_env_path("PATH", bin_dir)
+    _prepend_env_path("LD_LIBRARY_PATH", lib_dir)
+
+    # KeOps expects CUDA_PATH/include/{cuda.h,nvrtc.h}. In this conda layout,
+    # those headers live under targets/x86_64-linux/include.
+    if (cuda_root / "include" / "cuda.h").exists() and (cuda_root / "include" / "nvrtc.h").exists():
+        os.environ.setdefault("CUDA_PATH", str(cuda_root))
+        os.environ.setdefault("CUDA_HOME", str(cuda_root))
+
+    if not getattr(ctypes.util, "_ecgfm_find_library_patched", False):
+        real_find_library = ctypes.util.find_library
+        lib_map = {
+            "nvrtc": lib_dir / "libnvrtc.so",
+            "cudart": lib_dir / "libcudart.so",
+        }
+
+        def _patched_find_library(name: str):
+            candidate = lib_map.get(name)
+            if candidate is not None and candidate.exists():
+                return str(candidate)
+            return real_find_library(name)
+
+        ctypes.util.find_library = _patched_find_library
+        ctypes.util._ecgfm_find_library_patched = True
+
+    _configure_s4_runtime._done = True
+
+
+_configure_s4_runtime()
+
+
+def _build_conv_block(in_ch, out_ch, kernel_size=3, stride=1):
+    """Conv1d + BatchNorm + ReLU (CPC encoder 기본 블록)"""
+    return nn.Sequential(
+        nn.Conv1d(in_ch, out_ch, kernel_size=kernel_size, stride=stride,
+                  padding=(kernel_size - 1) // 2, bias=False),
+        nn.BatchNorm1d(out_ch),
+        nn.ReLU(inplace=True),
+    )
+
+
+class CPCEncoder(nn.Module):
+    """
+    CPC encoder wrapper (Hydra-free).
+
+    체크포인트에서 encoder (Conv1d) 와 predictor (S4) weights를 직접 로드합니다.
+    S4 predictor 로드에 실패하면 encoder-only로 fallback합니다.
+
+    forward(x) → (sequence_features, pooled_features)
+      - x: (B, 12, 5000) at 500Hz (10s) — resampled to 240Hz × 10s (2400 samples)
+           and cropped to 2.5s (600 samples) internally
+      - pooled_features: (B, 512)
+    """
+
+    def __init__(self, checkpoint=None, config_path=None):
+        super().__init__()
+        self.feature_dim = 512
+        self._has_predictor = False
+
+        # ── Encoder: 4-layer Conv1d ──
+        # Config: features=[512,512,512,512], kss=[3,1,1,1], strides=[2,1,1,1]
+        self.encoder = nn.Sequential(
+            _build_conv_block(12, 512, kernel_size=3, stride=2),   # layer 0
+            _build_conv_block(512, 512, kernel_size=1, stride=1),  # layer 1
+            _build_conv_block(512, 512, kernel_size=1, stride=1),  # layer 2
+            _build_conv_block(512, 512, kernel_size=1, stride=1),  # layer 3
+        )
+
+        # ── Predictor: S4 (try to load, optional) ──
+        try:
+            from clinical_ts.ts.s4_modules.s4_model import S4Model
+            self.predictor = S4Model(
+                d_input=512,
+                d_model=512,
+                d_output=None,        # no output head
+                d_state=8,            # state_dim from config
+                n_layers=4,
+                dropout=0.2,
+                tie_dropout=True,
+                prenorm=False,
+                l_max=1200,             # matches checkpoint omega size: (1200//2)+1=601
+                transposed_input=True,  # input is (B, D, L)
+                bidirectional=False,    # causal=True
+                layer_norm=True,        # not batchnorm
+                pooling=False,          # keep sequence
+                backbone="s42",
+            )
+            self._has_predictor = True
+            print("[CPCEncoder] S4 predictor loaded")
+        except Exception as e:
+            print(f"[CPCEncoder] S4 predictor 사용 불가 (encoder-only fallback): {e}")
+            self.predictor = None
+
+        if checkpoint:
+            self._load_checkpoint(checkpoint)
+
+    @staticmethod
+    def _install_stubs():
+        """Lightning ckpt 내 pickle이 참조하는 clinical_ts 하위 모듈 stub 등록."""
+        import types
+        STUB_MODULES = [
+            "clinical_ts.loss",
+            "clinical_ts.loss.selfsupervised",
+            "clinical_ts.metric",
+            "clinical_ts.metric.base",
+            "clinical_ts.task",
+            "clinical_ts.task.ecg",
+            "clinical_ts.template_modules",
+            "clinical_ts.ts.encoder",
+            "clinical_ts.ts.head",
+            "clinical_ts.ts.s4",
+        ]
+
+        class _StubClass:
+            def __init__(self, *a, **k): pass
+            def __reduce__(self): return (_StubClass, ())
+
+        for mod_name in STUB_MODULES:
+            if mod_name in sys.modules:
+                continue
+            mod = types.ModuleType(mod_name)
+            # 모든 속성 접근을 stub class로 반환
+            def _getattr(name, _mod=mod):
+                stub = type(f"Stub_{name}", (_StubClass,), {})
+                stub.__module__ = _mod.__name__
+                return stub
+            mod.__getattr__ = _getattr
+            sys.modules[mod_name] = mod
+
+    def _load_checkpoint(self, path):
+        # CPC (Lightning) 체크포인트는 pickled 메타데이터에 clinical_ts 모듈을
+        # 참조하므로, 미리 stub 모듈을 sys.modules에 등록해둔다.
+        self._install_stubs()
+        ckpt = torch.load(path, map_location="cpu", weights_only=False)
+        state = ckpt.get("state_dict", ckpt)
+
+        # ── Load encoder weights ──
+        # checkpoint: ts_encoder.encoder.layers.X.Y → model: X.Y
+        enc_state = {}
+        for k, v in state.items():
+            if k.startswith("ts_encoder.encoder.layers."):
+                new_key = k.replace("ts_encoder.encoder.layers.", "")
+                enc_state[new_key] = v
+
+        missing, unexpected = self.encoder.load_state_dict(enc_state, strict=False)
+        if missing:
+            print(f"[CPCEncoder] Encoder missing keys: {missing[:3]}...")
+        print(f"[CPCEncoder] Encoder loaded ({len(enc_state)} keys)")
+
+        # ── Load predictor weights ──
+        if self._has_predictor and self.predictor is not None:
+            pred_state = {}
+            for k, v in state.items():
+                if k.startswith("ts_encoder.predictor.predictor."):
+                    new_key = k.replace("ts_encoder.predictor.predictor.", "")
+                    pred_state[new_key] = v.clone()  # clone to avoid shared memory issues
+
+            if pred_state:
+                # S4 DPLR init creates shared-memory params (B, P, w are views).
+                # Must manually assign each param to avoid the shared memory error.
+                loaded, skipped = 0, []
+                model_dict = dict(self.predictor.named_parameters())
+                model_bufs = dict(self.predictor.named_buffers())
+                for k, v in pred_state.items():
+                    if k in model_dict:
+                        model_dict[k].data = v.clone()
+                        loaded += 1
+                    elif k in model_bufs:
+                        model_bufs[k].data = v.clone()
+                        loaded += 1
+                    else:
+                        skipped.append(k)
+                if skipped:
+                    print(f"[CPCEncoder] Predictor skipped keys: {skipped[:3]}...")
+                print(f"[CPCEncoder] Predictor loaded ({loaded}/{len(pred_state)} keys)")
+
+        print(f"[CPCEncoder] Loaded from {path} (epoch={ckpt.get('epoch', '?')})")
+
+    def forward(self, x):
+        """x: (B, 12, 5000) at 500Hz → resample to 240Hz × 10s (2400) → crop to 2.5s (600)"""
+        x = torch.nan_to_num(x)
+        # Resample 500Hz × 10s → 240Hz × 10s = 2400 samples
+        x = F.interpolate(x, size=2400, mode="linear", align_corners=False)
+        # Crop to input_size × fs_model = 2.5s × 240Hz = 600 samples
+        x = x[:, :, :600]
+
+        # Encoder: (B, 12, 600) → (B, 512, T')
+        enc_out = self.encoder(x)  # (B, 512, T')
+
+        if self._has_predictor and self.predictor is not None:
+            try:
+                pred_out = self.predictor(enc_out)
+                seq = pred_out.transpose(1, 2)
+            except Exception as e:
+                if not getattr(CPCEncoder, "_s4_warned", False):
+                    import traceback
+                    print(f"[CPCEncoder] S4 forward 실패 → encoder-only fallback: {type(e).__name__}: {e}")
+                    traceback.print_exc()
+                    print(f"[CPCEncoder] enc_out shape: {enc_out.shape}, dtype: {enc_out.dtype}, device: {enc_out.device}")
+                    CPCEncoder._s4_warned = True
+                self._has_predictor = False
+                seq = enc_out.transpose(1, 2)
+        else:
+            seq = enc_out.transpose(1, 2)
+
+        pooled = seq.mean(dim=1)  # (B, 512)
+        return seq, pooled
+
+    def get_layer_groups(self):
+        early, late = [], []
+        for name, param in self.named_parameters():
+            if "encoder" in name:
+                early.append(param)
+            else:
+                late.append(param)
+        return {"early": early, "late": late}
