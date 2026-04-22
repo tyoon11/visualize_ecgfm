@@ -1,7 +1,7 @@
 {
   "_comment": "ToF ECG config — 8-lead (I,II,V1-V6) @ 250Hz×2500, H5 스키마 'tof', base_name 키 조인",
 
-  "model_dir": "/home/coder/workspace/models/ECGFMs",
+  "model_dir": "/home/coder/workspace/data/ECGFMs",
 
   "models": null,
 
