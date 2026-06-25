@@ -1,0 +1,58 @@
+{
+  "_comment": "PTB-XL/ZZU 외 추가 5개 standard schema 데이터셋. heedb는 schema 다름/규모 큼으로 제외.",
+
+  "model_dir": "/home/irteam/ddn-opendata1/model/ECGFMs",
+
+  "models": null,
+
+  "target_fs": 500,
+  "target_length": 5000,
+
+  "datasets": [
+    {
+      "name": "chapman",
+      "h5_root": "/home/irteam/ddn-opendata1/h5/physionet/v2.0",
+      "table_csv": "/home/irteam/ddn-opendata1/h5/physionet/v2.0/chapman_table.csv",
+      "age_col": "age",
+      "age_scale": 100,
+      "display_color": "#9467bd",
+      "display_marker": "s"
+    },
+    {
+      "name": "sph",
+      "h5_root": "/home/irteam/ddn-opendata1/h5/sph/v2.0",
+      "table_csv": "/home/irteam/ddn-opendata1/h5/sph/v2.0/ecg_table.csv",
+      "age_col": "age",
+      "age_scale": 100,
+      "display_color": "#2ca02c",
+      "display_marker": "D"
+    },
+    {
+      "name": "cpsc2021",
+      "h5_root": "/home/irteam/ddn-opendata1/h5/cpsc2021/v2.0",
+      "table_csv": "/home/irteam/ddn-opendata1/h5/cpsc2021/v2.0/cpsc2021_table.csv",
+      "age_col": "age",
+      "age_scale": 100,
+      "display_color": "#ff7f0e",
+      "display_marker": "v"
+    },
+    {
+      "name": "code15",
+      "h5_root": "/home/irteam/ddn-opendata1/h5/code15/v2.0",
+      "table_csv": "/home/irteam/ddn-opendata1/h5/code15/v2.0/code15_table.csv",
+      "age_col": "age",
+      "age_scale": 100,
+      "display_color": "#8c564b",
+      "display_marker": "P"
+    },
+    {
+      "name": "mimic4",
+      "h5_root": "/home/irteam/ddn-opendata1/h5/mimic4/v2.0",
+      "table_csv": "/home/irteam/ddn-opendata1/h5/mimic4/v2.0/mimic4_table.csv",
+      "age_col": "age",
+      "age_scale": 100,
+      "display_color": "#e377c2",
+      "display_marker": "X"
+    }
+  ]
+}

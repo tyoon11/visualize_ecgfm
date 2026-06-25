@@ -12,7 +12,7 @@
     {
       "name": "ToF-ECG",
       "h5_root": "/home/coder/workspace/data/tof_ecg/ecg_h5",
-      "label_csv": "/home/coder/workspace/data/tof_ecg/labels.csv",
+      "label_csv": "/home/coder/workspace/data/tof_ecg/ecg_data_final.csv",
 
       "h5_schema": "tof",
       "join_key": "base_name",

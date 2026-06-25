@@ -1,0 +1,27 @@
+{
+  "_comment": "PTB-XL/ZZU \uc678 \ucd94\uac00 5\uac1c standard schema \ub370\uc774\ud130\uc14b. heedb\ub294 schema \ub2e4\ub984/\uaddc\ubaa8 \ud07c\uc73c\ub85c \uc81c\uc678.",
+  "model_dir": "/home/irteam/ddn-opendata1/model/ECGFMs",
+  "models": null,
+  "target_fs": 500,
+  "target_length": 5000,
+  "datasets": [
+    {
+      "name": "code15",
+      "h5_root": "/home/irteam/ddn-opendata1/h5/code15/v2.0",
+      "table_csv": "/home/irteam/ddn-opendata1/h5/code15/v2.0/code15_table.csv",
+      "age_col": "age",
+      "age_scale": 100,
+      "display_color": "#8c564b",
+      "display_marker": "P"
+    },
+    {
+      "name": "mimic4",
+      "h5_root": "/home/irteam/ddn-opendata1/h5/mimic4/v2.0",
+      "table_csv": "/home/irteam/ddn-opendata1/h5/mimic4/v2.0/mimic4_table.csv",
+      "age_col": "age",
+      "age_scale": 100,
+      "display_color": "#e377c2",
+      "display_marker": "X"
+    }
+  ]
+}
